@@ -6,6 +6,9 @@ import json
 import os
 import whisperx
 import requests
+import urllib.parse
+import hmac
+import hashlib
 from pathlib import Path
 from whisperx.diarize import DiarizationPipeline
 from utils import write_markdown
@@ -16,8 +19,6 @@ from fastapi import Request  # Add at top of file imports area
 # ---------- Modal Configuration ----------
 GPU_TYPE = "H100"
 TIMEOUT = 60 * 60 * 6  # 6-hour cap for 4-hour+ media
-WEBHOOK = os.environ.get("WEBHOOK_URL", "")
-S3 = boto3.client("s3")
 
 app = modal.App(
     "transcript-worker",
@@ -70,12 +71,51 @@ def log_debug(message, **kwargs):
     log_data.update(kwargs)
     print(f"[DEBUG] {json.dumps(log_data)}")
 
+# ---------- AWS S3 Client ----------
+def get_s3() -> boto3.client:
+    """
+    Create S3 client with credentials from environment variables.
+    This function should only be called inside Modal functions where secrets are injected.
+    """
+    # Validate required AWS credentials are present
+    required_creds = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
+    missing_creds = [var for var in required_creds if not os.environ.get(var)]
+    
+    if missing_creds:
+        log_error("Missing AWS credentials in environment", missing_vars=missing_creds)
+        raise RuntimeError(f"Missing AWS credentials in environment: {missing_creds}")
+    
+    log_debug("Creating S3 client with injected credentials", 
+             has_access_key=bool(os.environ.get("AWS_ACCESS_KEY_ID")),
+             has_secret_key=bool(os.environ.get("AWS_SECRET_ACCESS_KEY")),
+             region=os.environ.get("AWS_DEFAULT_REGION", "not-set"))
+    
+    return boto3.client("s3")
+
+# ---------- Webhook URL Validation ----------
+def validate_webhook_url() -> str:
+    """Validate and return webhook URL - only call inside Modal functions with secrets"""
+    webhook = os.environ.get("WEBHOOK_URL", "").rstrip("/")
+    if not webhook:
+        raise RuntimeError("WEBHOOK_URL env var missing")
+
+    parsed_webhook = urllib.parse.urlparse(webhook)
+    if parsed_webhook.path in ("", "/"):
+        raise RuntimeError(
+            "WEBHOOK_URL must include route path, e.g. "
+            "'https://your-domain.com/api/webhook/modal'"
+        )
+
+    log_debug("Webhook URL validated", webhook_url=webhook, parsed_path=parsed_webhook.path)
+    return webhook
+
 # ---------- Helper Functions ----------
 def download_from_s3(bucket: str, key: str, out: Path):
     """Download file from S3 to local path"""
     log_info("Starting S3 download", bucket=bucket, key=key, local_path=str(out))
     try:
-        S3.download_file(bucket, key, str(out))
+        s3 = get_s3()  # Create S3 client with injected credentials
+        s3.download_file(bucket, key, str(out))
         file_size = out.stat().st_size if out.exists() else 0
         log_info("S3 download completed", 
                 bucket=bucket, key=key, 
@@ -183,8 +223,10 @@ def upload_results(bucket: str, md: Path, js: Path):
             markdown_file=str(md), json_file=str(js))
     
     try:
+        s3 = get_s3()  # Create S3 client with injected credentials
+        
         # Upload markdown
-        S3.upload_file(
+        s3.upload_file(
             str(md), bucket, f"results/{md.name}",
             ExtraArgs={"ContentType": "text/markdown"}
         )
@@ -192,7 +234,7 @@ def upload_results(bucket: str, md: Path, js: Path):
                 bucket=bucket, key=f"results/{md.name}")
         
         # Upload JSON
-        S3.upload_file(
+        s3.upload_file(
             str(js), bucket, f"results/{js.name}",
             ExtraArgs={"ContentType": "application/json"}
         )
@@ -206,11 +248,82 @@ def upload_results(bucket: str, md: Path, js: Path):
         raise
 
 
+# ---------- Webhook Helper Function ----------
+def send_webhook(payload: dict, job_id: str = "unknown") -> None:
+    """
+    POST signed JSON payload to WEBHOOK_URL.
+    
+    Args:
+        payload: Dictionary containing webhook payload
+        job_id: Job identifier for logging
+    
+    Raises:
+        RuntimeError: If response.status_code != 204
+        ValueError: If WEBHOOK_SECRET is missing
+    """
+    try:
+        # Get and validate webhook URL
+        webhook_url = validate_webhook_url()
+        
+        webhook_secret = os.environ.get("WEBHOOK_SECRET", "")
+        if not webhook_secret:
+            log_error("WEBHOOK_SECRET not found in environment", job_id=job_id)
+            raise ValueError("WEBHOOK_SECRET required")
+        
+        # Sign the payload
+        payload_json = json.dumps(payload)
+        signature = hmac.new(
+            webhook_secret.encode(),
+            payload_json.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        
+        log_debug("Sending webhook", 
+                 job_id=job_id, webhook_url=webhook_url, 
+                 payload=payload)
+        
+        response = requests.post(
+            webhook_url,
+            headers={
+                "X-Modal-Signature": signature,
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=30
+        )
+        
+        # 🔑 Vital logging - includes first 300 chars of response
+        log_info(
+            "Webhook POST result",
+            job_id=job_id,
+            url=webhook_url,
+            status_code=response.status_code,
+            text_snippet=response.text[:300],
+        )
+        
+        # Strict validation - must be exactly 204
+        if response.status_code != 204:
+            log_error("Webhook returned unexpected status", 
+                     job_id=job_id, 
+                     status_code=response.status_code,
+                     response_text=response.text)
+            raise RuntimeError(f"Unexpected webhook status {response.status_code}")
+        
+        log_info("Webhook sent successfully", job_id=job_id)
+        
+    except requests.exceptions.RequestException as e:
+        log_error("Webhook request failed", error=e, job_id=job_id)
+        raise RuntimeError(f"Webhook request failed: {e}")
+    except Exception as e:
+        log_error("Webhook callback failed", error=e, job_id=job_id)
+        raise
+
+
 # ---------- GPU Function ----------
 @app.function(
     gpu=GPU_TYPE,
     timeout=TIMEOUT,
-    secrets=[modal.Secret.from_dotenv()]
+    secrets=[modal.Secret.from_name("transcript-worker-secret")]
 )
 def transcribe_task(job_json: str):
     """Main transcription task that runs on GPU"""
@@ -395,50 +508,7 @@ def transcribe_task(job_json: str):
                 "json_key": json_key
             }
             
-            try:
-                # Sign the webhook with HMAC
-                import hmac
-                import hashlib
-                webhook_secret = os.environ.get("WEBHOOK_SECRET", "")
-                
-                if not webhook_secret:
-                    log_error("WEBHOOK_SECRET not found in environment", job_id=job_id)
-                    raise ValueError("WEBHOOK_SECRET required")
-                
-                signature = hmac.new(
-                    webhook_secret.encode(),
-                    json.dumps(webhook_data).encode(),
-                    hashlib.sha256
-                ).hexdigest()
-                
-                log_debug("Sending webhook", 
-                         job_id=job_id, webhook_url=WEBHOOK, 
-                         payload=webhook_data)
-                
-                response = requests.post(
-                    WEBHOOK,
-                    headers={
-                        "X-Modal-Signature": signature,
-                        "Content-Type": "application/json"
-                    },
-                    json=webhook_data,
-                    timeout=30
-                )
-                
-                log_info("Webhook sent", 
-                        job_id=job_id, 
-                        status_code=response.status_code,
-                        response_text=response.text[:500])  # Limit response text
-                
-                if not response.ok:
-                    log_error("Webhook returned error status", 
-                             job_id=job_id, 
-                             status_code=response.status_code,
-                             response_text=response.text)
-                
-            except Exception as e:
-                log_error("Webhook callback failed", error=e, job_id=job_id)
-                # Don't raise here - transcription succeeded even if webhook failed
+            send_webhook(webhook_data, job_id)
         
         total_time = time.time() - start_time
         log_info("Transcription job completed successfully", 
@@ -452,35 +522,16 @@ def transcribe_task(job_json: str):
         log_error("Transcription job failed", error=e, job_id=job_id)
         
         # Send error webhook if we have job info
-        if job and WEBHOOK:
+        if job:
             try:
                 error_webhook_data = {
                     "job_id": job["job_id"],
                     "status": "error",
-                    "error_message": str(e)
+                    "error": str(e)
                 }
                 
-                import hmac
-                import hashlib
-                webhook_secret = os.environ.get("WEBHOOK_SECRET", "")
-                
-                if webhook_secret:
-                    signature = hmac.new(
-                        webhook_secret.encode(),
-                        json.dumps(error_webhook_data).encode(),
-                        hashlib.sha256
-                    ).hexdigest()
-                    
-                    requests.post(
-                        WEBHOOK,
-                        headers={
-                            "X-Modal-Signature": signature,
-                            "Content-Type": "application/json"
-                        },
-                        json=error_webhook_data,
-                        timeout=30
-                    )
-                    log_info("Error webhook sent", job_id=job_id)
+                send_webhook(error_webhook_data, job_id)
+                log_info("Error webhook sent", job_id=job_id)
             except Exception as webhook_error:
                 log_error("Failed to send error webhook", 
                          error=webhook_error, job_id=job_id)

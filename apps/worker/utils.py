@@ -1,4 +1,5 @@
 import datetime
+import urllib.parse
 from pathlib import Path
 from typing import Dict, List, Any
 
@@ -73,3 +74,24 @@ def write_markdown(transcript_data: Dict[str, Any], output_path: Path):
     
     # Write to file
     output_path.write_text("\n".join(markdown_lines), encoding="utf-8")
+
+
+def validate_webhook_url(url: str) -> None:
+    """
+    Validate that a webhook URL includes a proper path component.
+    
+    Args:
+        url: The webhook URL to validate
+        
+    Raises:
+        RuntimeError: If URL is empty or lacks a proper path
+    """
+    if not url:
+        raise RuntimeError("Webhook URL cannot be empty")
+    
+    parsed = urllib.parse.urlparse(url.rstrip("/"))
+    if parsed.path in ("", "/"):
+        raise RuntimeError(
+            "WEBHOOK_URL must include route path, e.g. "
+            "'https://your-domain.com/api/webhook/modal'"
+        )
