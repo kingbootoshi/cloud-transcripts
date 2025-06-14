@@ -2,7 +2,7 @@
 
 import { useState, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
-import { Upload, FileVideo, FileAudio, Loader2 } from 'lucide-react'
+import { FileVideo, FileAudio, Loader2 } from 'lucide-react'
 import { trpc } from '@/lib/trpc/client'
 import { 
   formatBytes, 
@@ -23,7 +23,7 @@ export function FileUpload({ onUploadComplete }: FileUploadProps) {
 
   const createPresignedUrl = trpc.upload.createPresignedUrl.useMutation()
 
-  const uploadFile = async (file: File) => {
+  const uploadFile = useCallback(async (file: File) => {
     setIsUploading(true)
     setError(null)
     setUploadProgress(0)
@@ -66,13 +66,13 @@ export function FileUpload({ onUploadComplete }: FileUploadProps) {
       setError(err instanceof Error ? err.message : 'Upload failed')
       setIsUploading(false)
     }
-  }
+  }, [createPresignedUrl, onUploadComplete])
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     if (acceptedFiles.length > 0) {
       uploadFile(acceptedFiles[0])
     }
-  }, [])
+  }, [uploadFile])
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,

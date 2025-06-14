@@ -15,6 +15,7 @@ from utils import write_markdown
 import traceback
 import time
 from fastapi import Request  # Add at top of file imports area
+from tenacity import retry, stop_after_attempt, wait_exponential
         
 # ---------- Modal Configuration ----------
 GPU_TYPE = "H100"
@@ -44,6 +45,7 @@ app = modal.App(
             "requests==2.32.3",
             "whisperx==3.3.4",
             "yt-dlp==2025.6.9",
+            "tenacity==9.0.0",
         )
         .add_local_python_source("utils")
     ),
@@ -70,6 +72,12 @@ def log_debug(message, **kwargs):
     log_data = {"level": "debug", "message": message, "timestamp": time.time()}
     log_data.update(kwargs)
     print(f"[DEBUG] {json.dumps(log_data)}")
+
+def log_warning(message, **kwargs):
+    """Structured logging for warning messages"""
+    log_data = {"level": "warning", "message": message, "timestamp": time.time()}
+    log_data.update(kwargs)
+    print(f"[WARNING] {json.dumps(log_data)}")
 
 # ---------- AWS S3 Client ----------
 def get_s3() -> boto3.client:
@@ -249,16 +257,17 @@ def upload_results(bucket: str, md: Path, js: Path):
 
 
 # ---------- Webhook Helper Function ----------
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=2, min=2, max=30))
 def send_webhook(payload: dict, job_id: str = "unknown") -> None:
     """
-    POST signed JSON payload to WEBHOOK_URL.
+    POST signed JSON payload to WEBHOOK_URL with retry logic.
     
     Args:
         payload: Dictionary containing webhook payload
         job_id: Job identifier for logging
     
     Raises:
-        RuntimeError: If response.status_code != 204
+        RuntimeError: If response.status_code != 204 after retries
         ValueError: If WEBHOOK_SECRET is missing
     """
     try:
@@ -313,6 +322,8 @@ def send_webhook(payload: dict, job_id: str = "unknown") -> None:
         
     except requests.exceptions.RequestException as e:
         log_error("Webhook request failed", error=e, job_id=job_id)
+        # Log retry attempt if this is being retried
+        log_warning("WEBHOOK_RETRY", job_id=job_id)
         raise RuntimeError(f"Webhook request failed: {e}")
     except Exception as e:
         log_error("Webhook callback failed", error=e, job_id=job_id)

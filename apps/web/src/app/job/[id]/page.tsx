@@ -2,10 +2,53 @@
 
 import { useParams } from 'next/navigation'
 import { trpc } from '@/lib/trpc/client'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { Loader2, CheckCircle, XCircle, Download } from 'lucide-react'
 import Link from 'next/link'
+
+function DownloadButton({ transcriptId }: { transcriptId: string }) {
+  const [isDownloading, setIsDownloading] = useState(false)
+  const downloadMutation = trpc.transcript.getDownloadUrl.useQuery(
+    { id: transcriptId, format: 'markdown' },
+    { enabled: false }
+  )
+
+  const handleDownload = async () => {
+    setIsDownloading(true)
+    try {
+      const result = await downloadMutation.refetch()
+      if (result.data?.url) {
+        // Create a temporary anchor element to trigger download
+        const link = document.createElement('a')
+        link.href = result.data.url
+        link.download = `transcript-${transcriptId}.md`
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+      }
+    } catch (error) {
+      console.error('Download failed:', error)
+    } finally {
+      setIsDownloading(false)
+    }
+  }
+
+  return (
+    <button
+      onClick={handleDownload}
+      disabled={isDownloading}
+      className="inline-flex items-center space-x-2 border border-input bg-background px-4 py-2 rounded-md hover:bg-accent hover:text-accent-foreground transition-colors disabled:opacity-50"
+    >
+      {isDownloading ? (
+        <Loader2 className="w-4 h-4 animate-spin" />
+      ) : (
+        <Download className="w-4 h-4" />
+      )}
+      <span>{isDownloading ? 'Downloading...' : 'Download'}</span>
+    </button>
+  )
+}
 
 export default function JobPage() {
   const params = useParams()
@@ -14,9 +57,9 @@ export default function JobPage() {
   const { data: job, isLoading, refetch } = trpc.job.get.useQuery(
     { id: jobId },
     {
-      refetchInterval: (data) => {
+      refetchInterval: (query) => {
         // Stop polling if job is done or errored
-        if (data?.status === 'done' || data?.status === 'error') {
+        if (query.state.data?.status === 'done' || query.state.data?.status === 'error') {
           return false
         }
         // Poll every 2 seconds while processing
@@ -76,21 +119,21 @@ export default function JobPage() {
     processing: Loader2,
     done: CheckCircle,
     error: XCircle,
-  }[job.status]
+  }[job.status as 'queued' | 'processing' | 'done' | 'error']
 
   const statusColor = {
     queued: 'text-muted-foreground',
     processing: 'text-primary',
     done: 'text-green-600',
     error: 'text-destructive',
-  }[job.status]
+  }[job.status as 'queued' | 'processing' | 'done' | 'error']
 
   const statusText = {
     queued: 'Waiting in queue...',
     processing: 'Processing your file...',
     done: 'Transcription complete!',
     error: 'An error occurred',
-  }[job.status]
+  }[job.status as 'queued' | 'processing' | 'done' | 'error']
 
   return (
     <main className="min-h-screen bg-background">
@@ -147,12 +190,7 @@ export default function JobPage() {
                   >
                     <span>View Transcript</span>
                   </Link>
-                  <button
-                    className="inline-flex items-center space-x-2 border border-input bg-background px-4 py-2 rounded-md hover:bg-accent hover:text-accent-foreground transition-colors"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span>Download</span>
-                  </button>
+                  <DownloadButton transcriptId={job.transcripts[0].id} />
                 </div>
               </div>
             )}

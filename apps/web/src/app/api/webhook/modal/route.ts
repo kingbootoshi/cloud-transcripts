@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServiceClient } from '@/lib/supabase/server'
+import { serviceClient } from '@/lib/supabase/service'
 import { logger } from '@/lib/logger'
 import { webhookPayloadSchema } from '@cloud-transcripts/db'
 import { JOB_STATUS } from '@cloud-transcripts/shared'
@@ -35,9 +35,11 @@ export async function POST(request: NextRequest) {
     })
 
     // Update database using service role client
-    const supabase = await createServiceClient()
+    const supabase = serviceClient
 
     // Update video status
+    log.debug('Attempting DB update', { job_id: payload.job_id, target_status: payload.status })
+    
     const { error: videoError } = await supabase
       .from('videos')
       .update({ 
@@ -47,12 +49,14 @@ export async function POST(request: NextRequest) {
       .eq('id', payload.job_id)
 
     if (videoError) {
-      log.error('Failed to update video status', {
+      log.error('DB_UPDATE_FAIL', {
         error: videoError.message,
         job_id: payload.job_id,
       })
       return NextResponse.json({ error: 'Failed to update video' }, { status: 500 })
     }
+    
+    log.info('DB_UPDATED', { job_id: payload.job_id, new_status: payload.status === 'done' ? JOB_STATUS.DONE : JOB_STATUS.ERROR })
 
     // Create transcript record if successful
     if (payload.status === 'done' && payload.md_key && payload.json_key) {

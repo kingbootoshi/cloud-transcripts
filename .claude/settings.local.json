@@ -4,7 +4,12 @@
       "Bash(npm install:*)",
       "Bash(mkdir:*)",
       "Bash(mv:*)",
-      "Bash(npx shadcn@latest init:*)"
+      "Bash(npx shadcn@latest init:*)",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__get-library-docs",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm run build:*)",
+      "Bash(grep:*)"
     ],
     "deny": []
   }

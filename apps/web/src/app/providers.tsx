@@ -21,7 +21,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
     trpc.createClient({
       links: [
         loggerLink({
-          enabled: (opts) =>
+          enabled: () =>
             typeof window !== 'undefined' && process.env.NODE_ENV === 'development',
         }),
         httpBatchLink({
