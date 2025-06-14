@@ -1,97 +1,88 @@
-import datetime
-import urllib.parse
+
+from datetime import timedelta
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, Any, List
+
+def _fmt(ts: float) -> str:
+    """HH:MM:SS zero-padded timestamp."""
+    return str(timedelta(seconds=int(ts)))
+
+def _append_full_transcript(lines: List[str], segments: List[Dict[str, Any]]) -> None:
+    lines.append("# Full Transcript\n")
+    last_speaker: str | None = None
+
+    for seg in segments:
+        speaker = seg.get("speaker", "UNKNOWN")
+        text = seg["text"].strip()
+
+        if speaker != last_speaker:
+            if last_speaker is not None:
+                lines.append("")  # blank line between turns
+            lines.append(f"**{speaker}:** {text}")
+        else:
+            lines[-1] += f" {text}"  # same speaker → continue paragraph
+
+        last_speaker = speaker
+
+    lines.append("")  # trailing blank line
 
 
-def format_timestamp(seconds: float) -> str:
-    """Convert seconds to mm:ss format"""
-    td = datetime.timedelta(seconds=seconds)
-    minutes = int(td.total_seconds() // 60)
-    seconds = int(td.total_seconds() % 60)
-    return f"{minutes:02d}:{seconds:02d}"
+def _append_segment_blocks(lines: List[str], segments: List[Dict[str, Any]]) -> None:
+    lines.append("# Timestamped Transcript\n")
+
+    for idx, seg in enumerate(segments, 1):
+        start, end = _fmt(seg["start"]), _fmt(seg["end"])
+        speaker = seg.get("speaker", "UNKNOWN")
+
+        # ▸ Segment header + plain text
+        lines += [
+            f"## Segment {idx}: [{start} - {end}] ({speaker})\n",
+            seg["text"].strip(),
+            "",
+        ]
+
+        # ▸ Word-level table
+        if not seg.get("words"):
+            continue
+
+        lines.append("### Word-level timestamps\n")
+
+        current_speaker: str | None = None
+        for w in seg["words"]:
+            w_speaker = w.get("speaker", speaker)
+            if w_speaker != current_speaker:
+                lines.append(f"\n**{w_speaker}:**")       # new speaker subsection
+                current_speaker = w_speaker
+            lines.append(f"- {w['word'].strip()} @ {_fmt(w['start'])}")
+
+        lines.append("")  # blank line after each word table
 
 
-def write_markdown(transcript_data: Dict[str, Any], output_path: Path):
+def write_markdown(result: Dict[str, Any], output_path: Path) -> None:
     """
-    Convert WhisperX JSON output to markdown with word-level timestamps
-    and speaker labels
+    Write a markdown transcript with:
+      • speaker-labelled ‘Full Transcript’
+      • per-segment blocks
+      • nested word-level timestamps
+      • summary footer
     """
-    markdown_lines = ["# Transcript\n"]
-    
-    # Extract segments
-    segments = transcript_data.get("segments", [])
-    
-    current_speaker = None
-    current_paragraph = []
-    current_start_time = None
-    
-    for segment in segments:
-        # Get words from segment
-        words = segment.get("words", [])
-        
-        for word in words:
-            speaker = word.get("speaker", "UNKNOWN")
-            text = word.get("text", "").strip()
-            start = word.get("start", 0)
-            
-            # Skip empty words
-            if not text:
-                continue
-            
-            # Handle speaker changes
-            if speaker != current_speaker:
-                # Write out previous paragraph if exists
-                if current_paragraph and current_start_time is not None:
-                    timestamp = format_timestamp(current_start_time)
-                    speaker_label = f"**{current_speaker}**" if current_speaker else "**UNKNOWN**"
-                    paragraph_text = " ".join(current_paragraph)
-                    markdown_lines.append(f"\n[{timestamp}] {speaker_label}: {paragraph_text}\n")
-                
-                # Start new paragraph
-                current_speaker = speaker
-                current_paragraph = [text]
-                current_start_time = start
-            else:
-                # Continue current paragraph
-                current_paragraph.append(text)
-    
-    # Write final paragraph
-    if current_paragraph and current_start_time is not None:
-        timestamp = format_timestamp(current_start_time)
-        speaker_label = f"**{current_speaker}**" if current_speaker else "**UNKNOWN**"
-        paragraph_text = " ".join(current_paragraph)
-        markdown_lines.append(f"\n[{timestamp}] {speaker_label}: {paragraph_text}\n")
-    
-    # Add metadata section
-    markdown_lines.extend([
-        "\n---\n",
-        "\n## Metadata\n",
-        f"- Total segments: {len(segments)}\n",
-        f"- Duration: {format_timestamp(segments[-1]['end']) if segments else 'N/A'}\n",
-        f"- Language: {transcript_data.get('language', 'N/A')}\n"
-    ])
-    
-    # Write to file
-    output_path.write_text("\n".join(markdown_lines), encoding="utf-8")
+    segments = result.get("segments", [])
+    if not segments:
+        raise ValueError("No segments found in WhisperX result")
 
+    md: list[str] = []
 
-def validate_webhook_url(url: str) -> None:
-    """
-    Validate that a webhook URL includes a proper path component.
-    
-    Args:
-        url: The webhook URL to validate
-        
-    Raises:
-        RuntimeError: If URL is empty or lacks a proper path
-    """
-    if not url:
-        raise RuntimeError("Webhook URL cannot be empty")
-    
-    parsed = urllib.parse.urlparse(url.rstrip("/"))
-    if parsed.path in ("", "/"):
-        raise RuntimeError(
-            "WEBHOOK_URL must include route path, e.g. "
-            "'https://your-domain.com/api/webhook/modal'"
-        )
+    _append_full_transcript(md, segments)
+    _append_segment_blocks(md, segments)
+
+    # ► Summary
+    md += [
+        "## Summary",
+        "",
+        f"Total segments: {len(segments)}",
+        f"Total duration: {_fmt(segments[-1]['end'] - segments[0]['start'])}",
+        "",
+    ]
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(md), encoding="utf-8")
