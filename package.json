@@ -3,7 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "workspaces": [
-    "apps/*",
+    "client",
+    "worker",
+    "types",
+    "infra/*",
+    "scripts",
     "packages/*"
   ],
   "scripts": {
